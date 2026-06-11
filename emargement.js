@@ -14,6 +14,8 @@ function main(workbook: ExcelScript.Workbook) {
 
   const OUT_SHEET = "Émargement - Tous groupes";
 
+
+
   const TITLE = "FEUILLE D'ÉMARGEMENT";
 
   const TABLE_USABLE_WIDTH_CM = 26;
@@ -2113,6 +2115,5 @@ function main(workbook: ExcelScript.Workbook) {
   }
 
 }
-
 
 
