@@ -14,8 +14,6 @@ function main(workbook: ExcelScript.Workbook) {
 
   const OUT_SHEET = "Émargement - Tous groupes";
 
-
-
   const TITLE = "FEUILLE D'ÉMARGEMENT";
 
   const TABLE_USABLE_WIDTH_CM = 26;
@@ -72,7 +70,7 @@ function main(workbook: ExcelScript.Workbook) {
 
     null | undefined;
 
-  interface Person { nom: string; prenom: string; }
+  interface Person { nom: string; prenom: string; sexe?: "H" | "F" | ""; }
 
   interface Day {
 
@@ -390,6 +388,54 @@ function main(workbook: ExcelScript.Workbook) {
 
 
 
+  function normSexe(raw: CellV): "H" | "F" | "" {
+    const s = norm(raw);
+    if (s === "h" || s === "m" || s === "homme" || s === "masculin" || s === "male" || s === "garcon") return "H";
+    if (s === "f" || s === "femme" || s === "feminin" || s === "female" || s === "fille") return "F";
+    return "";
+  }
+
+  function distributeBalancedBySexe(people: Person[], nbGroups: number): Person[][] {
+    const result: Person[][] = Array.from({ length: nbGroups }, () => [] as Person[]);
+    const withSexe = people.filter(p => p.sexe === "H" || p.sexe === "F").length;
+
+    if (withSexe === 0) {
+      let gi = 0;
+      for (const p of people) { result[gi].push(p); gi = (gi + 1) % nbGroups; }
+      return result;
+    }
+
+    const hommes = people.filter(p => p.sexe === "H");
+    const femmes = people.filter(p => p.sexe === "F");
+    const autres = people.filter(p => p.sexe !== "H" && p.sexe !== "F");
+
+    const countH = new Array<number>(nbGroups).fill(0);
+    const countF = new Array<number>(nbGroups).fill(0);
+
+    const assign = (list: Person[], counter: number[]) => {
+      for (const p of list) {
+        let best = 0;
+        for (let g = 1; g < nbGroups; g++) {
+          if (counter[g] < counter[best] ||
+            (counter[g] === counter[best] && result[g].length < result[best].length)) best = g;
+        }
+        result[best].push(p);
+        counter[best]++;
+      }
+    };
+
+    assign(hommes, countH);
+    assign(femmes, countF);
+
+    for (const p of autres) {
+      let best = 0;
+      for (let g = 1; g < nbGroups; g++) if (result[g].length < result[best].length) best = g;
+      result[best].push(p);
+    }
+
+    return result;
+  }
+
   function getUsedBlock(ws: ExcelScript.Worksheet): UsedBlock {
 
     const range = ws.getUsedRange(true);
@@ -425,31 +471,20 @@ function main(workbook: ExcelScript.Workbook) {
 
 
   function findNomPrenomHeaders(used: UsedBlock) {
-
     const isNom = (t: string) => /^(nom|noms)( des?)?( participants?)?$/.test(t) && !t.includes("entreprise");
-
     const isPre = (t: string) => /^(prenom|prenoms)( des?)?( participants?)?$/.test(t);
-
+    const isSexe = (t: string) => /^(sexe|genre)\b/.test(t);
     for (let r = 0; r < used.rows; r++) {
-
-      let cN = -1, cP = -1;
-
+      let cN = -1, cP = -1, cS = -1;
       for (let c = 0; c < used.cols; c++) {
-
         const t = norm(used.values[r][c]);
-
         if (cN === -1 && isNom(t)) cN = used.left + c;
-
         if (cP === -1 && isPre(t)) cP = used.left + c;
-
-        if (cN !== -1 && cP !== -1) return { row: used.top + r, colNom: cN, colPrenom: cP };
-
+        if (cS === -1 && isSexe(t)) cS = used.left + c;
       }
-
+      if (cN !== -1 && cP !== -1) return { row: used.top + r, colNom: cN, colPrenom: cP, colSexe: cS };
     }
-
     return null;
-
   }
 
 
@@ -857,33 +892,41 @@ function main(workbook: ExcelScript.Workbook) {
 
 
   const np = findNomPrenomHeaders(usedSrc);
-
   if (!np) showStopOnSource(`En-têtes "NOM" / "PRÉNOM" (participants) introuvables.`, src, "A1");
-
   const startRowParticipants = np.row + 1;
-
   const colNom = np.colNom; const colPrenom = np.colPrenom;
-
+  const colSexe = np.colSexe;
   const startRowRel = startRowParticipants - usedSrc.top;
-
   const colNomRel = colNom - usedSrc.left;
-
   const colPrenomRel = colPrenom - usedSrc.left;
-
-
+  const colSexeRel = colSexe >= 0 ? colSexe - usedSrc.left : -1;
 
   const participants: Person[] = [];
-
+  const sexeErrors: string[] = [];
+  let firstBadSexeAddr = "";
   for (let rr = startRowRel; rr < usedSrc.rows; rr++) {
-
     const n = String(usedSrc.values[rr][colNomRel] ?? "").trim();
-
     const p = String(usedSrc.values[rr][colPrenomRel] ?? "").trim();
-
     if (!n && !p) break;
+    let sx: "H" | "F" | "" = "";
+    if (colSexeRel >= 0) {
+      const rawSexe = usedSrc.values[rr][colSexeRel];
+      sx = normSexe(rawSexe);
+      if (sx === "" && String(rawSexe ?? "").trim() !== "") {
+        const cellAddr = `${toColLetter(colSexe + 1)}${usedSrc.top + rr + 1}`;
+        if (!firstBadSexeAddr) firstBadSexeAddr = cellAddr;
+        sexeErrors.push(`${cellAddr} ("${String(rawSexe).trim()}")`);
+      }
+    }
+    participants.push({ nom: n, prenom: p, sexe: sx });
+  }
 
-    participants.push({ nom: n, prenom: p });
-
+  if (sexeErrors.length > 0) {
+    showStopOnSource(
+      `${sexeErrors.length} valeur(s) de la colonne "Sexe" non reconnue(s) (attendu : H ou F). ` +
+      `Exemples : ${sexeErrors.slice(0, 5).join(", ")}.`,
+      src, firstBadSexeAddr || "A1"
+    );
   }
 
 
@@ -1024,17 +1067,7 @@ function main(workbook: ExcelScript.Workbook) {
 
   if (!preview) {
 
-    const initialGroups: Person[][] = Array.from({ length: groupsCount }, () => [] as Person[]);
-
-    let gi = 0;
-
-    for (let i = 0; i < participants.length; i++) {
-
-      initialGroups[gi].push(participants[i]);
-
-      gi = (gi + 1) % groupsCount;
-
-    }
+    const initialGroups: Person[][] = distributeBalancedBySexe(participants, groupsCount);
 
     preview = workbook.addWorksheet(PREVIEW_SHEET);
 
@@ -1085,29 +1118,32 @@ function main(workbook: ExcelScript.Workbook) {
 
 
       const totalRow = startRowPrev + dataLen;
-
       preview.getRangeByIndexes(totalRow, col - 1, 1, 1).setValue("Total");
-
       preview.getRangeByIndexes(totalRow, col, 1, 1).setValue(initialGroups[g].length);
-
       const totalFmt = preview.getRangeByIndexes(totalRow, col - 1, 1, 2).getFormat();
-
       totalFmt.getFont().setBold(true);
-
       totalFmt.getFill().setColor("#FFF6CC");
 
+      const nbH = initialGroups[g].filter(p => p.sexe === "H").length;
+      const nbF = initialGroups[g].filter(p => p.sexe === "F").length;
+      const nbAutre = initialGroups[g].length - nbH - nbF;
+      const mixiteText = `H: ${nbH} / F: ${nbF}` + (nbAutre > 0 ? ` / ?: ${nbAutre}` : "");
 
+      const detailRow = totalRow + 1;
+      preview.getRangeByIndexes(detailRow, col - 1, 1, 1).setValue("Mixité");
+      preview.getRangeByIndexes(detailRow, col, 1, 1).setValue(mixiteText);
+      const detailFmt = preview.getRangeByIndexes(detailRow, col - 1, 1, 2).getFormat();
+      detailFmt.getFont().setBold(false);
+      detailFmt.getFont().setItalic(true);
+      detailFmt.getFont().setSize(9);
+      detailFmt.getFont().setColor("#666666");
+      detailFmt.getFill().setColor("#FFFBEA");
 
       preview.getRange(`${colName}:${colName}`).getFormat().setColumnWidth(85);
-
       preview.getRange(`${colFirst}:${colFirst}`).getFormat().setColumnWidth(75);
-
       const borderStartRow = startRowPrev - 1;
-
-      const rowsCovered = 1 + dataLen + 1;
-
+      const rowsCovered = 1 + dataLen + 2;
       const rightColRange = preview.getRangeByIndexes(borderStartRow, col, rowsCovered, 1);
-
       addRightBorder(rightColRange.getFormat());
 
     }
@@ -2115,5 +2151,6 @@ function main(workbook: ExcelScript.Workbook) {
   }
 
 }
+
 
 
